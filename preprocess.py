@@ -93,10 +93,10 @@ def main(args):
 
 	filelist = glob(path.join(args.data_root, '*/*.mp4'))
 
-	jobs = [(vfile, args, i%args.ngpu) for i, vfile in enumerate(filelist)]
-	p = ThreadPoolExecutor(args.ngpu)
-	futures = [p.submit(mp_handler, j) for j in jobs]
-	_ = [r.result() for r in tqdm(as_completed(futures), total=len(futures))]
+	#jobs = [(vfile, args, i%args.ngpu) for i, vfile in enumerate(filelist)]
+	#p = ThreadPoolExecutor(args.ngpu)
+	#futures = [p.submit(mp_handler, j) for j in jobs]
+	#_ = [r.result() for r in tqdm(as_completed(futures), total=len(futures))]
 
 	print('Dumping audios...')
 

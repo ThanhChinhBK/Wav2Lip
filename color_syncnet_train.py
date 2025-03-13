@@ -18,10 +18,10 @@ from hparams import hparams, get_image_list
 
 parser = argparse.ArgumentParser(description='Code to train the expert lip-sync discriminator')
 
-parser.add_argument("--data_root", help="Root folder of the preprocessed LRS2 dataset", required=True)
+parser.add_argument("--data_root", help="Root folder of the preprocessed LRS2 dataset", required=False, default="../wav2lipdata/preprocessed/main")
 
-parser.add_argument('--checkpoint_dir', help='Save checkpoints to this directory', required=True, type=str)
-parser.add_argument('--checkpoint_path', help='Resumed from this checkpoint', default=None, type=str)
+parser.add_argument('--checkpoint_dir', help='Save checkpoints to this directory', required=False, default='checkpoints')
+parser.add_argument('--checkpoint_path', help='Resumed from this checkpoint', default=None)
 
 args = parser.parse_args()
 
@@ -35,8 +35,8 @@ syncnet_T = 5
 syncnet_mel_step_size = 16
 
 class Dataset(object):
-    def __init__(self, split):
-        self.all_videos = get_image_list(args.data_root, split)
+    def __init__(self, file_list):
+        self.all_videos = self.all_videos = get_image_list(file_list)
 
     def get_frame_id(self, frame):
         return int(basename(frame).split('.')[0])
@@ -67,10 +67,10 @@ class Dataset(object):
         return len(self.all_videos)
 
     def __getitem__(self, idx):
-        while 1:
+        while True:
             idx = random.randint(0, len(self.all_videos) - 1)
             vidname = self.all_videos[idx]
-
+        
             img_names = list(glob(join(vidname, '*.jpg')))
             if len(img_names) <= 3 * syncnet_T:
                 continue
@@ -78,18 +78,14 @@ class Dataset(object):
             wrong_img_name = random.choice(img_names)
             while wrong_img_name == img_name:
                 wrong_img_name = random.choice(img_names)
-
-            if random.choice([True, False]):
-                y = torch.ones(1).float()
-                chosen = img_name
-            else:
-                y = torch.zeros(1).float()
-                chosen = wrong_img_name
-
+        
+            y = torch.ones(1).float() if random.choice([True, False]) else torch.zeros(1).float()
+            chosen = img_name if y.item() == 1.0 else wrong_img_name
+        
             window_fnames = self.get_window(chosen)
             if window_fnames is None:
                 continue
-
+        
             window = []
             all_read = True
             for fname in window_fnames:
@@ -99,35 +95,35 @@ class Dataset(object):
                     break
                 try:
                     img = cv2.resize(img, (hparams.img_size, hparams.img_size))
-                except Exception as e:
+                except Exception:
                     all_read = False
                     break
-
+        
                 window.append(img)
-
-            if not all_read: continue
-
+        
+            if not all_read:
+                continue
+        
             try:
                 wavpath = join(vidname, "audio.wav")
                 wav = audio.load_wav(wavpath, hparams.sample_rate)
-
                 orig_mel = audio.melspectrogram(wav).T
-            except Exception as e:
+            except Exception:
                 continue
-
+        
             mel = self.crop_audio_window(orig_mel.copy(), img_name)
-
-            if (mel.shape[0] != syncnet_mel_step_size):
+        
+            if mel.shape[0] != syncnet_mel_step_size:
                 continue
-
+        
             # H x W x 3 * T
-            x = np.concatenate(window, axis=2) / 255.
+            x = np.concatenate(window, axis=2) / 255.0
             x = x.transpose(2, 0, 1)
-            x = x[:, x.shape[1]//2:]
-
+            x = x[:, x.shape[1] // 2:]
+        
             x = torch.FloatTensor(x)
             mel = torch.FloatTensor(mel.T).unsqueeze(0)
-
+        
             return x, mel, y
 
 logloss = nn.BCELoss()
@@ -250,8 +246,8 @@ if __name__ == "__main__":
     if not os.path.exists(checkpoint_dir): os.mkdir(checkpoint_dir)
 
     # Dataset and Dataloader setup
-    train_dataset = Dataset('train')
-    test_dataset = Dataset('val')
+    train_dataset = Dataset('filelists/train.txt')
+    test_dataset = Dataset('filelists/test.txt')
 
     train_data_loader = data_utils.DataLoader(
         train_dataset, batch_size=hparams.syncnet_batch_size, shuffle=True,

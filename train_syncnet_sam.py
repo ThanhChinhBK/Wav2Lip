@@ -72,6 +72,8 @@ def get_audio_length(audio_path):
 class Dataset(object):
     def __init__(self, file_list):
         self.all_videos = get_image_list(file_list)
+        random.shuffle(self.all_videos)
+        
     def get_frame_id(self, frame):
         return int(basename(frame).split('.')[0])
 
@@ -80,7 +82,7 @@ class Dataset(object):
         vidname = dirname(start_frame)
         window_fnames = []
         for frame_id in range(start_id, start_id + syncnet_T):
-            frame = join(vidname, f'{frame_id:05}.jpg')
+            frame = join(vidname, f'{frame_id}.jpg')
             if not isfile(frame):
                 return None
             window_fnames.append(frame)
@@ -89,6 +91,7 @@ class Dataset(object):
 
     def crop_audio_window(self, spec, start_frame):
         # num_frames = (T x hop_size * fps) / sample_rate
+        
         start_frame_num = self.get_frame_id(start_frame)
         start_idx = int(80. * (start_frame_num / float(hparams.fps)))
 
@@ -98,101 +101,114 @@ class Dataset(object):
     
     def __len__(self):
         return len(self.all_videos)
-
     def __getitem__(self, idx):
-        while 1:
-            
-            idx = random.randint(0, len(self.all_videos) - 1)
-            vidname = self.all_videos[idx]
-            img_names = list(glob(join(vidname, '*.jpg')))
-                
-            # print("len(img_names)):", len(img_names))
-            if len(img_names) <= 3 * syncnet_T:
-                continue
-            
-            img_name = random.choice(img_names)
-            wrong_img_name = random.choice(img_names)
-            
-            count_same = 0
-            while wrong_img_name == img_name:
-                wrong_img_name = random.choice(img_names)
-                count_same += 1
-                if count_same > 10:
-                    break
-            if count_same > 10:
-                continue
-            
-            if random.choice([True, False]):
-                y = torch.ones(1).float()
-                chosen = img_name
+        # random vid idx
+        # vid_idx =  random.randint(0, len(self.all_videos) - 1)
+        vidname = self.all_videos[idx % len(self.all_videos)]
+        # Check if the video is valid
+        img_names = sorted(list(glob(join(vidname, '*.jpg'))))
+    
+        if len(img_names) <= 3 * syncnet_T:
+            # Skip short videos
+            return self.__getitem__((idx + 1) % len(self.all_videos))
+    
+        # Deterministic positive/negative sampling based on index
+        is_positive = idx % 2 == 0
+    
+        if is_positive:  # Positive pair (synchronized)
+            # Choose a frame that has enough subsequent frames
+            max_start_idx = len(img_names) - syncnet_T
+            start_idx = idx % max_start_idx
+            img_name = img_names[start_idx]
+            chosen = img_name
+            y = torch.ones(1).float()
+        else:  # Negative pair (not synchronized)
+            # Select base frame
+            start_idx = idx % (len(img_names) - syncnet_T)
+            img_name = img_names[start_idx]
+    
+            # Create negative example by selecting temporally distant frame
+            if len(img_names) > syncnet_T * 3:
+                # Use frame from same video but distant enough
+                shift = syncnet_T * 2 + (idx % (len(img_names) - syncnet_T * 3))
+                wrong_idx = (start_idx + shift) % (len(img_names) - syncnet_T)
+                chosen = img_names[wrong_idx]
             else:
-                y = torch.zeros(1).float()
-                chosen = wrong_img_name
-
-            window_fnames = self.get_window(chosen)
-            if window_fnames is None:
-                # print("window_fnames")
-                continue
-
-            window = []
-            all_read = True
-            is_flip = random.random() < 0.5
-            for fname in window_fnames:
-                try:
-                    img = cv2.imread(fname)
-
-                    if is_flip:
-                        img = cv2.flip(img, 1)
-                    img = cv2.resize(img, (hparams.img_size, hparams.img_size))
-                except Exception as e:
-                    print(e)
-                    all_read = False
-                    break
-                window.append(img)
-
-            if not all_read:
-                print("if not all_read:")
-                continue
-
-
-            try:
-                mel_out_path = join(vidname, "mel.npy")
-                if os.path.isfile(mel_out_path):  # x50 times faster - 0.002 -> 0.01s
-                    with open(mel_out_path, "rb") as f:
-                        orig_mel = np.load(f)
+                # Use frame from different video if current one is too short
+                diff_vid_idx = (idx // 2) % len(self.all_videos)
+                if diff_vid_idx == idx % len(self.all_videos):
+                    diff_vid_idx = (diff_vid_idx + 1) % len(self.all_videos)
+                different_vid = self.all_videos[diff_vid_idx]
+                diff_img_names = sorted(list(glob(join(different_vid, '*.jpg'))))
+                if len(diff_img_names) > syncnet_T:
+                    chosen = diff_img_names[idx % len(diff_img_names)]
                 else:
-                    wavpath = os.path.join(vidname, "synced.wav")
-                    wav = audio.load_wav(wavpath, hparams.sample_rate)
-
-                    orig_mel = audio.melspectrogram(wav).T  # 0.2 -> 0.9s
-                    with open(mel_out_path, "wb") as f:
-                        np.save(f, orig_mel)
+                    # Fallback to using the same video but different frame
+                    wrong_idx = (start_idx + syncnet_T) % (len(img_names) - syncnet_T)
+                    chosen = img_names[wrong_idx]
+    
+            y = torch.zeros(1).float()
+    
+        window_fnames = self.get_window(chosen)
+        if window_fnames is None:
+            return self.__getitem__((idx + 1) % len(self.all_videos))
+    
+        window = []
+        all_read = True
+        # Deterministic augmentation based on index
+        is_flip = ((idx // len(self.all_videos)) % 2) == 0
+    
+        for fname in window_fnames:
+            try:
+                img = cv2.imread(fname)
+                if is_flip:
+                    img = cv2.flip(img, 1)
+                img = cv2.resize(img, (hparams.img_size, hparams.img_size))
             except Exception as e:
-                # print("mel", vidname)
-                continue
-
+                all_read = False
+                break
+            window.append(img)
+    
+        if not all_read:
+            return self.__getitem__((idx + 1) % len(self.all_videos))
+    
+        try:
+            mel_out_path = join(vidname, "mel.npy")
+            if os.path.isfile(mel_out_path):
+                with open(mel_out_path, "rb") as f:
+                    orig_mel = np.load(f)
+            else:
+                wavpath = os.path.join(vidname, "audio.wav")
+                wav = audio.load_wav(wavpath, hparams.sample_rate)
+                orig_mel = audio.melspectrogram(wav).T
+                with open(mel_out_path, "wb") as f:
+                    np.save(f, orig_mel)
+        except Exception as e:
+            return self.__getitem__((idx + 1) % len(self.all_videos))
+    
+        if is_positive:
+            # For positive examples, use aligned audio
             mel = self.crop_audio_window(orig_mel.copy(), img_name)
-
-            # mel augmentation
-            if random.random() < 0.3:
-                mel = mask_mel(mel)
-
-            del orig_mel
-
-            if (mel.shape[0] != syncnet_mel_step_size):
-                # print("Mel shape")
-                continue
-
-            # H x W x 3 * T
-            # x = np.concatenate(window, axis=2) / 255. # [0, 1]
-            x = (np.concatenate(window, axis=2) / 255.0)
-            x = x.transpose(2, 0, 1)
-            x = x[:, x.shape[1]//2:]
-
-            x = torch.FloatTensor(x)
-            mel = torch.FloatTensor(mel.T).unsqueeze(0)
-
-            return x, mel, y
+        else:
+            # For negative examples, use audio from chosen frame (already mismatched)
+            mel = self.crop_audio_window(orig_mel.copy(), chosen)
+    
+        # Apply mel augmentation with fixed pattern
+        if idx % 3 == 0:  # Apply to exactly 1/3 of samples
+            mel = mask_mel(mel)
+    
+        if mel.shape[0] != syncnet_mel_step_size:
+            return self.__getitem__((idx + 1) % len(self.all_videos))
+    
+        # Process images as before
+        x = (np.concatenate(window, axis=2) / 255.0)
+        x = x.transpose(2, 0, 1)
+        x = x[:, x.shape[1]//2:]
+    
+        x = torch.FloatTensor(x)
+        mel = torch.FloatTensor(mel.T).unsqueeze(0)
+    
+        return x, mel, y
 
 logloss = nn.BCELoss()
 def cosine_loss(a, v, y):
@@ -202,18 +218,25 @@ def cosine_loss(a, v, y):
     return loss
 
 def train(device, model, train_data_loader, test_data_loader, optimizer,
-          checkpoint_dir=None, checkpoint_interval=None, nepochs=None):
+          checkpoint_dir=None, checkpoint_interval=None, nepochs=None, scheduler=None):
 
     global global_step, global_epoch
     resumed_step = global_step
     logger = CSVLogger(args.history_train, name=args.exp_num)
 
+    # Track metrics per epoch
+    train_metrics = {'epoch': [], 'train_loss': [], 'eval_loss': [], 'epoch_time': []}
+    
     stop_training = False
     while global_epoch < nepochs:
         st_e = time()
         try:
-            print('Starting Epoch: {}'.format(global_epoch))
+            print(f'Starting Epoch: {global_epoch} | Best Loss: {best_loss:.6f}')
             running_loss = 0.
+            correct_preds = 0
+            total_preds = 0
+            batch_times = []
+            
             for step, (x, mel, y) in enumerate(train_data_loader):
                 
                 st = time()
@@ -221,75 +244,166 @@ def train(device, model, train_data_loader, test_data_loader, optimizer,
                 optimizer.zero_grad()
 
                 x = x.to(device)
-            
                 mel = mel.to(device)
                 y = y.to(device)
+                
                 a, v = model(mel, x)
                 loss = cosine_loss(a, v, y)
                 loss.backward()
+
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
                 optimizer.step()
 
                 d = nn.functional.cosine_similarity(a, v)
-
+                
+                # Calculate accuracy (prediction matches label)
+                pred = (d > 0.5).float()
+                correct_preds += (pred.squeeze() == y.squeeze()).sum().item()
+                total_preds += y.size(0)
+                
                 global_step += 1
 
                 cur_session_steps = global_step - resumed_step
                 running_loss += loss.item()
+                
+                batch_time = time() - st
+                batch_times.append(batch_time)
 
-                print(f"Step {global_step} | out_of_sync_distance: {d.detach().cpu().clone().numpy().mean():.8f} | Loss: {running_loss/(step+1):.8f} | Elapsed: {(time() - st):.5f}")
-                # if global_step == 1 or global_step % checkpoint_interval == 0:
-
-                if global_step % 500 == 0:
+                if step % 5 == 0:  # Print every 5 steps
+                    avg_loss = running_loss/(step+1)
+                    accuracy = correct_preds/total_preds if total_preds > 0 else 0
+                    print(f"Step {global_step} | Sync Distance: {d.detach().cpu().clone().numpy().mean():.6f} | "
+                          f"Loss: {avg_loss:.6f} | Accuracy: {accuracy:.4f} | "
+                          f"Batch Time: {batch_time:.3f}s | LR: {optimizer.param_groups[0]['lr']:.6f}")
+                
+                # Log metrics periodically
+                if global_step % 20 == 0:
                     with torch.no_grad():
                         model.eval()
+                        print(f"\n--- Evaluation at step {global_step} ---")
                         eval_loss = eval_model(test_data_loader, global_step, device, model, checkpoint_dir)
-                        # if eval_loss < 0.25:
-                        #     stop_training = True
-                    save_checkpoint(model, optimizer, global_step, checkpoint_dir, global_epoch, eval_loss)
-                    logger.log_metrics({
+                        if scheduler:
+                            scheduler.step(eval_loss)
+                    
+                    # Log metrics
+                    metrics = {
                         "train_loss": running_loss / (step + 1),
-                        "eval_loss": eval_loss
-                        },step=global_step)
+                        "train_accuracy": correct_preds/total_preds if total_preds > 0 else 0,
+                        "eval_loss": eval_loss,
+                        "learning_rate": optimizer.param_groups[0]['lr'],
+                        "batch_time_avg": sum(batch_times) / len(batch_times) if batch_times else 0
+                    }
+                    
+                    logger.log_metrics(metrics, step=global_step)
                     logger.save()
+                    
+                    save_checkpoint(model, optimizer, global_step, checkpoint_dir, global_epoch, eval_loss)
                     model.train()
-
-                # prog_bar.set_description('Loss: {}'.format(running_loss / (step + 1)))
-                #delete(x,mel,y)
+                    
+                    # Reset batch timing stats
+                    batch_times = []
+                
                 del x, mel, y
+
+            # End of epoch reporting
+            epoch_time = time() - st_e
+            avg_epoch_loss = running_loss / len(train_data_loader)
+            accuracy = correct_preds / total_preds if total_preds > 0 else 0
+            
+            print(f"\nEpoch {global_epoch} completed in {epoch_time:.2f}s | "
+                  f"Avg Loss: {avg_epoch_loss:.6f} | Accuracy: {accuracy:.4f}\n")
+            
+            # Store epoch metrics
+            train_metrics['epoch'].append(global_epoch)
+            train_metrics['train_loss'].append(avg_epoch_loss)
+            train_metrics['epoch_time'].append(epoch_time)
+            
+            # Run evaluation at end of epoch if not recently done
+            if global_step % 500 > 100:
+                with torch.no_grad():
+                    model.eval()
+                    print(f"--- End of Epoch {global_epoch} Evaluation ---")
+                    eval_loss = eval_model(test_data_loader, global_step, device, model, checkpoint_dir)
+                    train_metrics['eval_loss'].append(eval_loss)
+                    save_checkpoint(model, optimizer, global_step, checkpoint_dir, global_epoch, eval_loss)
+            
             if stop_training:
                 print("The model has converged, stop training.")
                 break
-            print("Epoch time:", time() - st_e)
+                
             global_epoch += 1
+            
         except KeyboardInterrupt:
-            print("KeyboardInterrupt")
+            print("KeyboardInterrupt - Saving checkpoint before exiting")
+            save_checkpoint(model, optimizer, global_step, checkpoint_dir, global_epoch, 1000)
             break
+            
+    # Final save
     save_checkpoint(model, optimizer, global_step, checkpoint_dir, global_epoch, 1000)
     logger.save()
+    
+    # Print training summary
+    print("\n=== Training Summary ===")
+    print(f"Total epochs: {global_epoch}")
+    print(f"Best validation loss: {best_loss:.6f}")
+    print(f"Total steps: {global_step}")
 
 
-def eval_model(test_data_loader, global_step, device, model, checkpoint_dir):
-    eval_steps = 10
-    print('Evaluating for {} steps'.format(eval_steps))
-    losses = []
-    for step, (x, mel, y) in enumerate(test_data_loader):
-        print("Eval step", step)
-        # model.eval()
+def eval_model(test_data_loader, global_step, device, model, checkpoint_dir, max_eval_steps=None):
+    """
+    Evaluate the model on the test dataset
+    
+    Args:
+        test_data_loader: DataLoader for validation data
+        global_step: Current training step
+        device: Device to run evaluation on
+        model: Model to evaluate
+        checkpoint_dir: Directory for checkpoints
+        max_eval_steps: Maximum number of evaluation steps (None for full evaluation)
+    
+    Returns:
+        Average evaluation loss
+    """
+    model.eval()  # Set model to evaluation mode
 
-        # Transform data to CUDA device
-        x = x.to(device)
+    with torch.no_grad():  # Disable gradient computation
+        losses = []
+        correct_preds = 0
+        total_preds = 0
+        print(f'Evaluating model at step {global_step}...')
 
-        mel = mel.to(device)
+        for step, (x, mel, y) in enumerate(test_data_loader):
+            if max_eval_steps is not None and step >= max_eval_steps:
+                break
 
-        a, v = model(mel, x)
-        y = y.to(device)
+            # Move data to device
+            x = x.to(device)
+            mel = mel.to(device)
+            y = y.to(device)
 
-        loss = cosine_loss(a, v, y)
-        print("Eval loss", loss.item())
-        losses.append(loss.item())
+            # Forward pass
+            a, v = model(mel, x)
+            loss = cosine_loss(a, v, y)
 
-    averaged_loss = sum(losses) / len(losses)
-    print(averaged_loss)
+            # Calculate similarity
+            d = nn.functional.cosine_similarity(a, v)
+
+            # Calculate accuracy
+            pred = (d > 0.5).float()
+            correct_preds += (pred.squeeze() == y.squeeze()).sum().item()
+            total_preds += y.size(0)
+
+            losses.append(loss.item())
+
+            if step % 5 == 0:
+                print(f"Eval step {step}/{len(test_data_loader)}, loss: {loss.item():.6f}")
+
+        # Calculate metrics
+        averaged_loss = sum(losses) / len(losses)
+        accuracy = correct_preds / total_preds if total_preds > 0 else 0
+
+        print(f"Evaluation results - Loss: {averaged_loss:.6f}, Accuracy: {accuracy:.4f}")
 
     return averaged_loss
 
@@ -399,7 +513,14 @@ def run():
 
 
     optimizer = optim.Adam([p for p in model.parameters() if p.requires_grad],
-                           lr=hparams.syncnet_lr)
+                           lr=hparams.syncnet_lr,
+                           weight_decay=1e-5)  # Add weight decay for regularization
+
+    # Add learning rate scheduler
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, 'min', factor=0.5, patience=5, verbose=True, min_lr=1e-6
+    )
+
 
     if checkpoint_path is not None:
         load_checkpoint(checkpoint_path, model, optimizer, reset_optimizer=False)
@@ -411,7 +532,7 @@ def run():
     train(device, model, train_data_loader,test_data_loader, optimizer,
           checkpoint_dir=checkpoint_dir,
           checkpoint_interval=hparams.syncnet_checkpoint_interval,
-          nepochs=hparams.nepochs)
+          nepochs=hparams.nepochs, scheduler=None)
 
 
 if __name__ == "__main__":

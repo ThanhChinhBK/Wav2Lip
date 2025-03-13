@@ -81,7 +81,7 @@ class Dataset(object):
 
         window_fnames = []
         for frame_id in range(start_id, start_id + syncnet_T):
-            frame = join(vidname, f'{frame_id:05}.jpg')
+            frame = join(vidname, f'{frame_id}.jpg')
             if not isfile(frame):
                 return None
             window_fnames.append(frame)
@@ -307,7 +307,7 @@ def train(device, model, disc, train_data_loader, test_data_loader, optimizer, d
             stop_training = False
             # print('Starting Epoch: {}'.format(global_epoch))
 
-            running_sync_loss, running_l1_loss, running_perceptual_loss = 0., 0., 0., 0.
+            running_sync_loss, running_l1_loss, running_perceptual_loss = 0., 0., 0.
             running_disc_real_loss, running_disc_fake_loss = 0., 0.
             running_vgg_loss= 0.
             st = time.time()
@@ -584,7 +584,7 @@ def run():
     train_dataset = Dataset('filelists/train.txt')
     test_dataset = Dataset('filelists/test.txt')
 
-    hparams.set_hparam('batch_size', 64)
+    hparams.set_hparam('batch_size', 16)
     hparams.set_hparam('syncnet_wt', 0.03)
     
     train_data_loader = data_utils.DataLoader(
